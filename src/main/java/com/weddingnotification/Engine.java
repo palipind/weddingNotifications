@@ -1,63 +1,60 @@
 package com.weddingnotification;
 
-// Internal Stuff
-import com.palipind.weddingdb.DeviceToken;
-import com.palipind.weddingdb.Event;
-import com.palipind.weddingdb.WeddingEvent;
-import com.weddingnotification.util.HibernateUtil;
-import com.weddingnotification.util.DateUtil;
-import com.weddingnotification.Notification;
+import com.weddingnotification.job.EventNotificationJob;
 
-import org.hibernate.Session;
+import org.quartz.*;
+import org.quartz.impl.StdSchedulerFactory;
 
-import java.util.List;
-import java.util.ArrayList;
-import java.util.Date;
+import javax.servlet.ServletContextEvent;
+import javax.servlet.ServletContextListener;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * @author Rohan Jain
  */
+public class Engine implements ServletContextListener {
+    Scheduler _scheduler;
 
-public class Engine {
-	/**
-     * Main notification engine.
-     * To be called by job scheduler.
-     * @Input 'timeInterval' in minutes
-     * Send event notification to all devices
-     * for events lying between now() and now() + timeInterval
-     * @return
-     */
-	private static int DEFAULT_INTERVAL = 15;
-    public static void main(String[] args) {
-    	int intervalMinutes = extractTimeInterval(args);
-        Date startInterval = DateUtil.getCurrentUtcDate();
-        Date endInterval = DateUtil.addInterval(startInterval, intervalMinutes);
+    private static final int THIRTY_MINUTE_INTERVAL = 30;
 
-        Session session = HibernateUtil.getSessionFactory().openSession();
+    private static final String NOTIFICATION_GROUP_NAME = "notificationGroup";
+    private static final String EVENT_NOTIFICATION_TRIGGER_NAME = "eventNotificationTrigger";
+    private static final String EVENT_NOTIFICATION_JOB_NAME = "eventNotificationJob";
 
-        DbAccessor dba = new DbAccessor(session);
-        List<WeddingEvent> weddingEvents = dba.getWeddingEventsBetween(startInterval, endInterval);
-        for (WeddingEvent weddingEvent:weddingEvents) {
-        	List<DeviceToken> deviceTokens = dba.getDeviceTokensForWeddingEvent(weddingEvent);
-        	List<String> tokens = new ArrayList<String>();
-            for(DeviceToken deviceToken : deviceTokens) {
-                tokens.add(deviceToken.getDeviceToken());
-            }
-        	Notification notification = new Notification("dev", weddingEvent.getMessage(), tokens);
-            notification.post();
+    private static Logger LOG = Logger.getLogger(Engine.class.getName());
+
+    @Override
+    public void contextInitialized(ServletContextEvent servletContextEvent) {
+        try {
+            SimpleScheduleBuilder notificationSchedule = SimpleScheduleBuilder.simpleSchedule()
+                    .withIntervalInMinutes(THIRTY_MINUTE_INTERVAL).repeatForever();
+
+            Trigger notificationTrigger = TriggerBuilder.newTrigger()
+                    .withIdentity(EVENT_NOTIFICATION_TRIGGER_NAME, NOTIFICATION_GROUP_NAME)
+                    .withSchedule(notificationSchedule)
+                    .build();
+
+            JobDetail eventNotificationJob = JobBuilder.newJob(EventNotificationJob.class)
+                    .withIdentity(EVENT_NOTIFICATION_JOB_NAME, NOTIFICATION_GROUP_NAME).build();
+
+            _scheduler = new StdSchedulerFactory().getScheduler();
+            _scheduler.start();
+            LOG.log(Level.INFO, "Scheduling job : " + eventNotificationJob.getKey().getName());
+            _scheduler.scheduleJob(eventNotificationJob, notificationTrigger);
+
+        } catch (SchedulerException e) {
+            LOG.log(Level.SEVERE, "Error occurred in context initialization", e);
         }
-        session.close();
     }
 
-    private static int extractTimeInterval(String[] args) {
-    	if (args.length == 0)
-    		return DEFAULT_INTERVAL;
-    	try {
-        	int intervalMinutes = Integer.parseInt(args[0]);
-        	return (intervalMinutes == 0) ? DEFAULT_INTERVAL : intervalMinutes;
-        }
-        catch (Exception e) {
-        	return DEFAULT_INTERVAL;
+    @Override
+    public void contextDestroyed(ServletContextEvent servletContextEvent) {
+        try {
+            LOG.log(Level.INFO, "Shutting down scheduler");
+            _scheduler.shutdown();
+        } catch (SchedulerException e) {
+            LOG.log(Level.SEVERE, "Unable to shutdown scheduler", e);
         }
     }
 }
